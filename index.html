@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="fr"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Rugby Arcade – v2</title>
+<style>
+:root{--bg:#f4f1ea;--fg:#1c1c1c;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#17201a;--fg:#eee}}
+:root[data-theme="dark"]{--bg:#17201a;--fg:#eee}
+html,body{margin:0;background:var(--bg);color:var(--fg);font-family:system-ui,sans-serif;text-align:center}
+canvas{max-width:100%;max-height:78vh;border-radius:8px}
+p{margin:6px 12px;font-size:14px}
+</style></head><body>
+<p><b>Flèches</b> : courir · <b>Q / D</b> : passe gauche / droite · <b>Espace</b> : sprint · <b>Entrée</b> : valider · <b>Échap</b> : retour</p>
+<canvas id="c"></canvas>
+<script>
+/* ============ 1. DONNÉES (effectifs) — à enrichir : stats, équipes, ligues ============ */
+const W=480,H=720;
+const POSTES=['Pilier G','Talonneur','Pilier D','2e ligne','2e ligne','Flanker G','Flanker D','Numéro 8','Demi de mêlée','Ouvreur','Ailier G','Centre','Centre','Ailier D','Arrière'];
+const NOMS=['Martin','Bernard','Dubois','Moreau','Laurent','Simon','Michel','Lefèvre','Garcia','Roux','Fournier','Girard','Bonnet','Mercier','Faure'];
+const VIT=[4,4,4,5,5,6,6,6,7,7,9,8,8,9,8];
+const mkTeam=(nom,couleur,off)=>({nom,couleur,joueurs:POSTES.map((p,i)=>({num:i+1,nom:NOMS[(i+off)%15],poste:p,vit:VIT[i]}))});
+const TEAMS=[mkTeam('Toulouse Arcade','#1d4ed8',0),mkTeam('Les Rouges','#d33',6)];
+/* Positions de soutien (relatives au porteur) : index = joueur. */
+const OFF=[...Array(8)].map((_,i)=>({ox:(i-3.5)*24,oy:75+(i%2)*18})).concat([
+ {ox:-45,oy:25},{ox:0,oy:0},{ox:-200,oy:55},{ox:-100,oy:42},{ox:95,oy:42},{ox:200,oy:55},{ox:0,oy:140}]);
+
+/* ============ 2. OUTILS ============ */
+const clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
+const dist=(a,b)=>Math.hypot(a.x-b.x,a.y-b.y);
+const spd=p=>2.2+p.vit*0.05;
+function moveTo(o,tx,ty,s){const d=Math.hypot(tx-o.x,ty-o.y);if(d<1)return;const r=Math.min(1,s/d);o.x+=(tx-o.x)*r;o.y+=(ty-o.y)*r;}
+const keys={},pressed=new Set();
+addEventListener('keydown',e=>{const k=e.key.toLowerCase();if(!keys[k])pressed.add(k);keys[k]=1;if(k===' '||k.startsWith('arrow'))e.preventDefault();});
+addEventListener('keyup',e=>keys[e.key.toLowerCase()]=0);
+const hit=k=>pressed.has(k);
+
+/* ============ 3. LOGIQUE DE MATCH (indépendante de l'affichage) ============ */
+let M=null,score=0,best=0;
+function newMatch(){
+  const T=TEAMS[0],ctrl=9,cx=W/2,cy=H-130;
+  const att=T.joueurs.map((j,i)=>({...j,slot:{...OFF[i]},x:clamp(cx+OFF[i].ox,12,W-12),y:Math.min(H-12,cy+OFF[i].oy)}));
+  const def=TEAMS[1].joueurs.map((j,i)=>{const r=i<8?0:1,lane=r?(i-7.5)*(W/7):(i+.5)*(W/8);
+    return {...j,lane,y0:r?200:330,x:lane,y:r?200:330,v:1.5+Math.random()*.5};});
+  M={att,def,ctrl,ball:{x:cx,y:cy-14,fly:false},sp:0,cd:0,state:'play',msg:''};
+}
+function pass(dir){
+  const A=M.att,c=A[M.ctrl];let best=-1,bd=1e9;
+  A.forEach((p,i)=>{if(i===M.ctrl)return;const dx=(p.x-c.x)*dir;if(dx<12)return;const d=dx+Math.abs(p.y-c.y)*.4;if(d<bd){bd=d;best=i;}});
+  if(best<0)return;
+  const r=A[best];[c.slot,r.slot]=[r.slot,c.slot];M.ctrl=best;M.ball.fly=true;
+}
+function stepMatch(){
+  if(M.state!=='play')return;
+  const A=M.att,D=M.def,c=A[M.ctrl],b=M.ball;
+  const dx=(keys.arrowright?1:0)-(keys.arrowleft?1:0),dy=(keys.arrowdown?1:0)-(keys.arrowup?1:0);
+  if(M.cd>0)M.cd--;if(M.sp>0)M.sp--;
+  if(keys[' ']&&M.cd===0){M.sp=30;M.cd=180;}
+  const n=Math.hypot(dx,dy)||1,s=spd(c)*(M.sp>0?1.9:1)*(dy>0?.6:1);
+  c.x=clamp(c.x+dx/n*s,10,W-10);c.y=Math.min(H-10,c.y+dy/n*s);
+  if(hit('q'))pass(-1);if(hit('d'))pass(1);
+  /* IA attaque : chaque joueur rejoint son poste autour du porteur */
+  for(const p of A){if(p===c)continue;moveTo(p,clamp(c.x+p.slot.ox,12,W-12),Math.min(H-12,c.y+p.slot.oy),spd(p)*1.08);}
+  /* IA défense : 3 plus proches + ceux à moins de 110 chargent, les autres tiennent la ligne */
+  const chasers=new Set([...D].sort((a,b)=>dist(a,c)-dist(b,c)).slice(0,3));
+  for(const d of D){
+    if(chasers.has(d)||dist(d,c)<110)moveTo(d,c.x,c.y-8,d.v);
+    else moveTo(d,clamp(d.lane+(c.x-W/2)*.35,12,W-12),d.y0,d.v*.8);
+    for(const o of D)if(o!==d){const q=dist(d,o);if(q<20&&q>0){d.x+=(d.x-o.x)/q*.8;d.y+=(d.y-o.y)/q*.8;}}
+    if(dist(d,c)<17){M.state='lost';M.msg='PLAQUÉ !';}
+  }
+  if(b.fly){moveTo(b,c.x,c.y-14,9);if(dist(b,c)<18)b.fly=false;
+    for(const d of D)if(dist(d,b)<13){M.state='lost';M.msg='INTERCEPTÉ !';}}
+  else{b.x=c.x;b.y=c.y-14;}
+  if(c.y<40){M.state='try';M.msg='ESSAI !';score++;best=Math.max(best,score);}
+  if(M.state==='lost')score=0;
+}
+
+/* ============ 4. AFFICHAGE (seule partie à remplacer pour la 3D iso) ============ */
+const cv=document.getElementById('c'),g=cv.getContext('2d');cv.width=W;cv.height=H;
+const S=(x,y)=>[x,y]; /* projection monde -> écran : à remplacer par l'isométrique */
+function disc(x,y,r,col){const[a,b]=S(x,y);g.fillStyle=col;g.beginPath();g.arc(a,b,r,0,7);g.fill();}
+function txt(t,x,y,size,col,al){g.fillStyle=col||'#fff';g.font=(size||16)+'px system-ui';g.textAlign=al||'center';g.fillText(t,x,y);}
+function drawField(){
+  g.fillStyle='#2e8b3e';g.fillRect(0,0,W,H);g.fillStyle='rgba(255,255,255,.06)';
+  for(let i=0;i<9;i+=2)g.fillRect(0,40+i*75,W,75);
+  g.strokeStyle='#fff';g.lineWidth=3;g.beginPath();g.moveTo(0,40);g.lineTo(W,40);g.stroke();
+  g.lineWidth=1.5;g.setLineDash([10,8]);
+  for(const y of [190,H/2+60,H-100]){g.beginPath();g.moveTo(0,y);g.lineTo(W,y);g.stroke();}
+  g.setLineDash([]);txt('ZONE D’ESSAI',W/2,28,20,'rgba(255,255,255,.5)');
+}
+function drawMatch(){
+  drawField();
+  for(const d of M.def)disc(d.x,d.y,11,TEAMS[1].couleur);
+  M.att.forEach((p,i)=>{disc(p.x,p.y,11,TEAMS[0].couleur);if(i===M.ctrl){g.strokeStyle='#ff0';g.lineWidth=3;g.beginPath();g.arc(...S(p.x,p.y),15,0,7);g.stroke();}});
+  disc(M.ball.x,M.ball.y,6,'#8b4513');
+  txt('Essais : '+score+'  (record '+best+')',10,H-12,16,'#fff','left');
+  g.fillStyle='#fff';g.fillRect(W-110,H-26,100*(1-M.cd/180),10);
+  if(M.state!=='play'){g.fillStyle='rgba(0,0,0,.55)';g.fillRect(0,H/2-55,W,110);
+    txt(M.msg,W/2,H/2-8,30);txt('Entrée : rejouer · Échap : menu',W/2,H/2+28,16);}
+}
+
+/* ============ 5. SCÈNES (menu, effectifs, match) ============ */
+let scene='menu',sel=0;const ITEMS=['Match rapide','Effectifs'];
+function stepScene(){
+  if(scene==='menu'){
+    if(hit('arrowdown'))sel=(sel+1)%ITEMS.length;if(hit('arrowup'))sel=(sel+ITEMS.length-1)%ITEMS.length;
+    if(hit('enter')){if(sel===0){newMatch();scene='match';}else scene='roster';}
+  }else if(scene==='roster'){if(hit('escape')||hit('enter'))scene='menu';}
+  else{
+    stepMatch();
+    if(M.state!=='play'){if(hit('enter')){newMatch();}if(hit('escape'))scene='menu';}
+  }
+}
+function drawScene(){
+  if(scene==='match'){drawMatch();return;}
+  g.fillStyle='#1f5f2b';g.fillRect(0,0,W,H);
+  if(scene==='menu'){
+    txt('RUGBY ARCADE',W/2,200,44);txt('prototype v2',W/2,235,16,'#cfe');
+    ITEMS.forEach((t,i)=>txt((i===sel?'▶ ':'')+t,W/2,330+i*50,26,i===sel?'#ff0':'#fff'));
+    txt('↑ ↓ pour choisir · Entrée pour valider',W/2,H-40,14,'#cfe');
+  }else{
+    txt('EFFECTIF — '+TEAMS[0].nom,W/2,50,24);
+    TEAMS[0].joueurs.forEach((j,i)=>{const y=100+i*34;
+      txt(j.num+'  '+j.poste,24,y,16,'#fff','left');txt(j.nom,250,y,16,'#cfe','left');
+      g.fillStyle='#ff0';g.fillRect(350,y-11,j.vit*12,10);});
+    txt('Vitesse →',350,82,13,'#cfe','left');txt('Entrée / Échap : retour',W/2,H-30,14,'#cfe');
+  }
+}
+
+function loop(){stepScene();drawScene();pressed.clear();requestAnimationFrame(loop);}
+loop();
+</script></body></html>
